@@ -5,23 +5,23 @@
 </p>
 
 <p align="center">
-  <strong>A Go library and toolkit for building resilient, multi-hop proxy chains with rotation, end-to-end encryption, traffic evasion, circuit breakers, and observability.</strong>
+  <strong>A Go library and toolkit for building resilient, multi-hop proxy chains with rotation, an encrypted tunnel, traffic evasion, circuit breakers, and observability.</strong>
 </p>
 
 <p align="center">
-  Chain HTTP CONNECT / SOCKS5 proxies, rotate their order, encrypt end-to-end, shape traffic, monitor health, and self-heal. Stdlib-first with a small set of focused dependencies.
+  Chain HTTP CONNECT / SOCKS5 proxies, rotate their order, add an encrypted tunnel, shape traffic, monitor health, and self-heal. Stdlib-first with a small set of focused dependencies.
 </p>
 
 ## Overview
 
 wraith gives you one `net.Conn` that reaches a target through a sequence of proxies. The caller sees a normal connection; the library handles proxy negotiation, hop ordering, failure recovery, optional encryption, and optional traffic shaping.
 
-- **Hop types**: HTTP CONNECT (Basic / Digest / NTLMv2, optional TLS), SOCKS5 TCP (username/password), HTTP/2 CONNECT (`h2`, `h2c`), SOCKS5 UDP ASSOCIATE.
-- **Chaining**: N-hop sequential tunneling with per-hop CONNECT / SOCKS5 negotiation, context-aware dials, and buffered reads so no handshake bytes leak into application data.
+- **Hop types**: HTTP CONNECT (Basic / Digest / NTLMv2; `https` hops get TLS only in the first position), SOCKS5 TCP (username/password), HTTP/2 CONNECT (`h2`, `h2c`). SOCKS5 UDP ASSOCIATE is a standalone single-hop helper, not a chain hop.
+- **Chaining**: N-hop sequential tunneling with per-hop CONNECT / SOCKS5 negotiation, dials whose `ctx` bounds the TCP connect (proxy handshakes have no deadline yet), and buffered reads so no handshake bytes leak into application data.
 - **Rotation**: Random, RoundRobin, Weighted (fewest failures, then lowest latency), Latency (probes hops in parallel, then sorts).
 - **Resilience**: per-hop circuit breaker with exponential backoff + jitter, retries, spare-pool self-healing, background health probes, fail-closed mode, host-based routing, and multipath policies.
-- **Encryption**: X25519 + AES-256-GCM tunnel, layered onion wrapping, pre-shared-key mode, rekeying, and padded frames.
-- **Evasion**: jitter, padding, fragmentation, decoy connections, domain fronting, SNI/header randomization, canary tokens, honeypot checks, DoH, and a ghost-mode preset.
+- **Encryption**: X25519 + AES-256-GCM tunnel and pre-shared-key mode. The key exchange is unauthenticated and frame nonces are reused across directions; see Encryption before relying on it.
+- **Evasion**: jitter, padding, fragmentation, decoy connections, SNI/header randomization, canary tokens, honeypot checks, DoH, and a ghost-mode preset.
 - **Observability**: atomic counters with an HTTP handler, JSON/HTML health dashboard, and hop-level stats (`HopsSnapshot`, `HopStats`).
 - **Config**: YAML (JSON-compatible), `PROXY_CHAIN` env input, validation, and hot reload via fsnotify.
 - **Extensibility**: pluggable `SessionStore`, `RateLimiter`, and `Metrics` interfaces.
@@ -32,14 +32,14 @@ Full walkthrough: [USAGE.md](./USAGE.md).
 
 | Area | Details |
 |---|---|
-| Hop protocols | HTTP CONNECT (Basic/Digest/NTLMv2 + TLS), SOCKS5 TCP, HTTP/2 CONNECT (`h2`/`h2c`), SOCKS5 UDP ASSOCIATE |
-| Chaining | Sequential tunneling, N hops, context-aware dials, connection pooling, host-based routing, fail-closed |
+| Hop protocols | HTTP CONNECT (Basic/Digest/NTLMv2; TLS in first position only), SOCKS5 TCP, HTTP/2 CONNECT (`h2`/`h2c`), SOCKS5 UDP ASSOCIATE (standalone) |
+| Chaining | Sequential tunneling, N hops, connection pooling, host-based routing, opt-in fail-closed |
 | Rotation | Random, RoundRobin, Weighted, Latency; sticky sessions with TTL and pluggable persistence |
 | Resilience | Circuit breaker, retries, spare-pool replacement, pooling, background probes, multipath failover/stripe/fastest/race |
-| Crypto | `Wrap`, `WrapLayers`, `WrapKey`, `WrapPadded`, `Rekey`, `DeriveKey`, `OnionKeyExchange` |
-| Evasion | Jitter, padding, fragmentation, decoys, domain fronting, SNI/header randomization, canaries, honeypot detection |
+| Crypto | `Wrap`, `WrapKey`, `DeriveKey`, `OnionKeyExchange`. `WrapLayers`, `WrapPadded` and `Rekey` are exported but do not behave as their names suggest (see Encryption) |
+| Evasion | Jitter, padding, fragmentation, decoys, SNI/header randomization, canaries, honeypot detection |
 | DNS | DNS-over-HTTPS resolver dialer; wire into `chain` with `WithDialer(dns.NewDialer())` |
-| PROXY protocol | HAProxy PROXY v2 parse/emit; `proxyd -proxyproto` preserves the real client IP |
+| PROXY protocol | `proxyproto` emits and parses a PROXY v2 header, but its signature bytes differ from the HAProxy spec, so other implementations do not recognize it. `proxyd -proxyproto` requires the header but does not use the client address |
 | WebSocket | Binary WebSocket tunnels with ping/pong keepalive and dead-peer detection |
 | Config | YAML (JSON-compatible), env (`PROXY_CHAIN`), validation, hot reload (fsnotify) |
 | Binaries | `proxychain` (ping/list), `proxyd` (CONNECT server forwarding through a chain) |
@@ -52,11 +52,11 @@ Full walkthrough: [USAGE.md](./USAGE.md).
 - **Strategies** — choose hop order: random, round-robin, or “best first” (weighted/latency).
 - **`chain.NewMultiChain(paths, policy)`** — combines several chains/paths. `MultipathFailover` tries in order, `MultipathStripe` rotates, `MultipathFastest` prefers low latency, `MultipathRace` dials all and takes the first success.
 - **`WithRetries(n)`** — retry a failed dial up to `n` extra times.
-- **`WithTunnel(true)`** — encrypts traffic end-to-end so intermediate proxies only see ciphertext.
+- **`WithTunnel(true)`** — wrap the connection in the `crypto` tunnel. The target must run the same protocol, and the tunnel is not authenticated; see Encryption.
 - **`WithWebSocketTunnel(wsURL, cfg)`** — carries the chained connection inside a WebSocket, with ping/pong keepalive that closes dead peers.
 - **`WithJitter(min, max)`** — waits a random time between hops to break timing patterns.
 - **`WithFailClosed(true)`** — never fall back to a direct dial when no proxy is available.
-- **`WithRoute(fn)`** — pick a proxy list per target host (split tunneling).
+- **`WithRoute(fn)`** — pick a proxy list per target host.
 - **`crypto.Wrap(conn, initiator)`** — wrap a connection in X25519 + AES-256-GCM.
 - **`evade.Pad` / `evade.FragmentWrite`** — hide payload sizes and write chunk sizes.
 - **`config.Watch`** — reload settings automatically when the config file changes.
@@ -100,7 +100,7 @@ Each `bufferedConn` keeps handshake bytes from bleeding into application reads. 
 | `WithTimingJitter(min, max)` | Random delay before each application write |
 | `WithCoverTraffic(cfg)` | Length-prefixed decoy frames on idle connections (both ends must enable) |
 | `WithRetries(n)` | Extra dial attempts |
-| `WithTunnel(bool)` | End-to-end X25519 + AES-GCM tunnel |
+| `WithTunnel(bool)` | X25519 + AES-GCM tunnel to a peer running the same protocol (unauthenticated; see Encryption) |
 | `WithWebSocketTunnel(rawURL, cfg)` | WebSocket transport with keepalive |
 | `WithMetrics(m)` | Metrics recorder (adds per-hop stats when it implements `HopMetrics`) |
 | `WithDialer(d)` | Raw TCP dialer for direct targets and proxy connections |
@@ -114,7 +114,7 @@ Each `bufferedConn` keeps handshake bytes from bleeding into application reads. 
 | `WithHealthInterval(d)` | Background probe interval |
 | `WithSpareProxies(spares)` | Self-healing replacement pool |
 | `WithFailClosed(on)` | Disable direct dial when no proxies are available/routed |
-| `WithRoute(fn)` | Host-based split tunneling |
+| `WithRoute(fn)` | Pick a proxy list per target host |
 | `GhostOptions()` | Preset slice combining jitter, retries, tunnel, rate limit, pool, probes |
 
 ## Extensibility
@@ -141,7 +141,7 @@ Proxy credentials go in the proxy URL:
 
 ```text
 http://user:pass@proxy.example.com:8080
-http://DOMAIN\\user:pass@proxy.example.com:8080    # NTLM; DOMAIN optional
+http://DOMAIN%5Cuser:pass@proxy.example.com:8080    # NTLM; DOMAIN optional, backslash written as %5C
 socks5://user:pass@proxy.example.com:1080
 ```
 
@@ -153,13 +153,18 @@ socks5://user:pass@proxy.example.com:1080
 ## Encryption (`crypto` package)
 
 - `Wrap(conn, initiator)` — X25519 key exchange + AES-256-GCM frames.
-- `WrapLayers(conn, initiator, n)` — onion-style nested tunnels.
-- `WrapKey(conn, key)` — use a pre-shared 32-byte key.
-- `WrapPadded(conn, initiator, size)` — pad writes to a fixed frame size to reduce size leakage.
-- `Rekey(conn, newKey)` — rotate to a fresh key.
+- `WrapLayers(conn, initiator, n)` — nested `Wrap` tunnels between the same two endpoints. No hop peels a layer, so the layers add overhead rather than a second line of defense.
+- `WrapKey(conn, key)` — use a pre-shared key (16, 24 or 32 bytes). Frame numbers restart at zero on every connection, so one key must not be reused across connections.
+- `WrapPadded(conn, initiator, size)` — pads writes shorter than `size` with random bytes. The padding carries no length marker and is not removed on read, so it corrupts the stream for any receiver that does not strip it itself.
+- `Rekey(conn, newKey)` — stack a new `WrapKey` tunnel on `conn`. There is no handshake, so both ends must switch at the same point in the stream.
 - `DeriveKey(shared, label)` — HKDF-like key derivation.
 
-`WithTunnel(true)` uses `Wrap` on each dial; both ends must enable it.
+`WithTunnel(true)` uses `Wrap` on each dial. The far end has to run `Wrap(conn, false)` itself; against a server that does not, the tunnel does not work. The tunnel has two known weaknesses:
+
+- The key exchange is not authenticated. Anyone on the path, including every proxy in the chain, can sit in the middle and relay plaintext.
+- Both ends derive one key and number frames from zero in each direction, so the same key and nonce protect frame *n* both ways. A passive observer can XOR the plaintexts. With `WrapKey` this also repeats across every connection.
+
+Treat it as protection against passive eavesdropping only until it is replaced with an authenticated protocol.
 
 ## Evasion toolkit (`evade` package)
 
@@ -168,11 +173,11 @@ socks5://user:pass@proxy.example.com:1080
 - `FragmentWrite` — random-sized writes.
 - `RandomSNI`, `RandomHeaders`, `RandomOrder` — fingerprint randomization.
 - `DecoyBurst` — short-lived noise connections.
-- `DomainFront` — separate SNI from the Host header.
+- `DomainFront` — returns its two arguments unchanged. It is a placeholder; nothing in the library performs domain fronting.
 - `Canary` / `CanaryLeaked` — interception detection.
 - `HoneypotIP` / `HoneypotProbe` — sinkhole and altered-traffic detection. `HoneypotChecker` supports configurable CIDR sets; `HoneypotProbeTimeout` adds a read deadline.
 
-`chain.GhostOptions()` bundles a conservative subset: jitter, retries, encryption, rate limit, pooling, and frequent health probes.
+`chain.GhostOptions()` bundles jitter, retries, `WithTunnel(true)`, a rate limit, pooling, and frequent health probes. Because it enables the tunnel, it only works against a peer that runs `Wrap(conn, false)`.
 
 Opt-in decoy helpers:
 
@@ -188,12 +193,12 @@ These helpers cost bandwidth and can break protocol state if applied blindly. Ke
 
 ## DNS (`dns` package)
 
-- `Resolver` — multi-endpoint DoH resolver (Cloudflare primary, Google fallback), 5s timeout, and a 1-minute positive cache. `NewResolver(endpoints...)` for custom sets.
+- `Resolver` — multi-endpoint DoH resolver (Cloudflare primary, Google fallback), 5s timeout, and a 1-minute positive cache. `NewResolver()` takes no arguments; for custom endpoints set the exported `Endpoints` field.
 - `Resolve(host)` / `ResolveContext(ctx, host)` — query the default resolver.
 - `DialContext(ctx, network, addr)` — resolve via DoH, then dial the returned IP.
 - `NewDialer()` — a `hop.ContextDialer` that performs DoH resolution before dialing.
 
-Wire it into the chain with `chain.WithDoH()` (or `chain.WithDialer(dns.NewDialer())`). It then resolves both direct targets and proxy hostnames via DoH; resolution failures fall back to the original hostname.
+Wire it into the chain with `chain.WithDoH()` (or `chain.WithDialer(dns.NewDialer())`). It then resolves direct targets and the hostnames of hops configured at construction via DoH. Resolution failures fall back to the system resolver; hops supplied by `WithRoute` or restored from a session are not covered.
 
 ## Config
 
@@ -225,7 +230,7 @@ go run ./cmd/proxyd -addr :8080 -config chain.yaml -proxyproto
 ```
 
 - `proxychain` — list chains or ping a target through them.
-- `proxyd` — HTTP CONNECT server that forwards through a configured chain. `-proxyproto` accepts HAProxy PROXY v2 headers to preserve the real client IP.
+- `proxyd` — HTTP CONNECT server that forwards through a configured chain. `-proxyproto` requires a PROXY v2 header on every inbound connection. The client address it carries is not used yet, and the header does not match the HAProxy spec.
 
 ## Dashboard
 
@@ -239,8 +244,8 @@ Serves `/health` JSON and a small HTML auto-refresh view.
 
 - Done: uTLS fingerprint randomization for HTTPS proxies
 - Done: HTTP/2 CONNECT (`h2`/`h2c`) via `golang.org/x/net/http2`
-- Done: SOCKS5 UDP ASSOCIATE
-- Done: HAProxy PROXY protocol v2 (`proxyproto` + `proxyd -proxyproto`)
+- Done: SOCKS5 UDP ASSOCIATE (standalone `hop.DialSocks5UDP`, single hop)
+- Partial: PROXY protocol v2 (`proxyproto` + `proxyd -proxyproto`); the signature does not match the spec yet
 - Done: NTLMv2 proxy auth (HTTP CONNECT; HTTP/2 CONNECT stays Basic-only)
 - Done: WebSocket tunnel with keepalive (`ws` + `chain.WithWebSocketTunnel`)
 - Done: Multipath routing (`chain.MultiChain`: failover/stripe/fastest/race)
@@ -290,7 +295,7 @@ go test ./...
 go test -race ./...
 ```
 
-`chain/stress_test.go` covers mixed hop counts (1/2/3/5/8), all strategies, dead-hop filtering, spares, pooling, jitter, and concurrency. `chain/bench_test.go` contains dial benchmarks. Fuzz and unit tests cover hop parsing, crypto, evade, config, and metrics.
+`chain/stress_test.go` runs mixed hop counts (1/2/3/5/8) across all strategies with spares, pooling and jitter enabled, and passes as long as no more than 10 of its 20 concurrent dials fail; it does not assert dead-hop filtering, spare replacement or pool reuse. `chain/bench_test.go` contains dial benchmarks. One fuzz target covers `hop.New`. Unit tests exercise the HTTP CONNECT, NTLM, HTTP/2 (`h2c`) and UDP ASSOCIATE handshakes, the `crypto.Wrap` round trip, several `evade` helpers, config validation and the metrics snapshot. There are no tests yet for SOCKS5 TCP, HTTPS hops, fail-closed, routing, sessions, rate limiting, hot reload, the dashboard or the two binaries.
 
 ## License
 
